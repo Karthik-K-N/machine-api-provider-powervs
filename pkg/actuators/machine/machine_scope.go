@@ -75,6 +75,9 @@ func newMachineScope(params machineScopeParams) (*machineScope, error) {
 	if providerSpec.ServiceInstanceID != "" {
 		klog.Warningf("ServiceInstanceID is set but its depreciated, Please use serviceInstance instead")
 		serviceInstanceID = &providerSpec.ServiceInstanceID
+	} else if providerStatus.ServiceInstanceID != nil {
+		serviceInstanceID = providerStatus.ServiceInstanceID
+		klog.Infof("Found ServiceInstanceID from providerStatus %s", *serviceInstanceID)
 	} else {
 		minimalPowerVSClient, err := params.powerVSMinimalClient(params.client)
 		if err != nil {
@@ -84,6 +87,8 @@ func newMachineScope(params machineScopeParams) (*machineScope, error) {
 		if err != nil {
 			return nil, machineapierros.InvalidMachineConfiguration("error getting ServiceInstance ID, Error: %v", err)
 		}
+		// Setting ServiceInstanceID here so that in the next iteration it will be fetched early
+		providerStatus.ServiceInstanceID = serviceInstanceID
 	}
 
 	powerVSClient, err := params.powerVSClientBuilder(params.client, credentialsSecretName, params.machine.Namespace,
