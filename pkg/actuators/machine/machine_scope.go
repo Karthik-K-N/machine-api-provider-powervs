@@ -141,6 +141,9 @@ func (s *machineScope) patchMachine() error {
 // getUserData fetches the user-data from the secret referenced in the Machine's
 // provider spec, if one is set.
 func (s *machineScope) getUserData() ([]byte, error) {
+
+	fmt.Println("##############")
+	fmt.Printf("%+v\n", s.providerSpec)
 	if s.providerSpec == nil || s.providerSpec.UserDataSecret == nil {
 		return nil, nil
 	}

@@ -145,7 +145,8 @@ func TestSetMachineCloudProviderSpecifics(t *testing.T) {
 		},
 	}
 	instance := &models.PVMInstance{
-		Status: &testStatus,
+		SysType: testSysType,
+		Status:  &testStatus,
 	}
 
 	r.setMachineCloudProviderSpecifics(instance)
@@ -164,28 +165,41 @@ func TestSetMachineCloudProviderSpecifics(t *testing.T) {
 	if machineRegionLabel != testRegion {
 		t.Errorf("Expected machine %s label value as %s: but got: %s", machinecontroller.MachineAZLabelName, testZone, machineZoneLabel)
 	}
+
+	machineInstanceTypeLabel := r.machine.Labels[machinecontroller.MachineInstanceTypeLabelName]
+	if machineInstanceTypeLabel != testSysType {
+		t.Errorf("Expected machine %s label value as %s: but got: %s", machinecontroller.MachineInstanceTypeLabelName, testSysType, machineInstanceTypeLabel)
+	}
+
+	err := r.setMachineCloudProviderSpecifics(nil)
+	if err != nil {
+		t.Fatalf("expected error to be nil but get %v", err)
+	}
 }
 
 func TestCreate(t *testing.T) {
 	// mock aws API calls
 	mockCtrl := gomock.NewController(t)
 	mockPowerVSClient := mock.NewMockClient(mockCtrl)
-	mockPowerVSClient.EXPECT().GetInstanceByName(gomock.Any()).Return(stubGetInstance(), nil)
-	mockPowerVSClient.EXPECT().CreateInstance(gomock.Any()).Return(stubGetInstances(), nil)
-	mockPowerVSClient.EXPECT().GetInstance(gomock.Any()).Return(stubGetInstance(), nil)
-	mockPowerVSClient.EXPECT().DeleteInstance(gomock.Any()).Return(nil).AnyTimes()
-	mockPowerVSClient.EXPECT().GetImages().Return(stubGetImages(imageNamePrefix, 3), nil)
-	mockPowerVSClient.EXPECT().GetNetworks().Return(stubGetNetworks(networkNamePrefix, 3), nil)
+	mockPowerVSClient.EXPECT().GetInstanceByName(gomock.Any()).Return(stubGetInstance(), nil).AnyTimes()
+	mockPowerVSClient.EXPECT().CreateInstance(gomock.Any()).Return(stubGetInstances(), nil).AnyTimes()
+	mockPowerVSClient.EXPECT().GetInstance(gomock.Any()).Return(stubGetInstance(), nil).AnyTimes()
+	mockPowerVSClient.EXPECT().DeleteInstance(gomock.Any()).Return(nil).AnyTimes().AnyTimes()
+	mockPowerVSClient.EXPECT().GetImages().Return(stubGetImages(imageNamePrefix, 3), nil).AnyTimes()
+	mockPowerVSClient.EXPECT().GetNetworks().Return(stubGetNetworks(networkNamePrefix, 3), nil).AnyTimes()
 	mockPowerVSClient.EXPECT().GetRegion().Return(testRegion).AnyTimes()
 	mockPowerVSClient.EXPECT().GetZone().Return(testZone).AnyTimes()
 
 	credSecretName := fmt.Sprintf("%s-%s", credentialsSecretName, rand.String(nameLength))
 	userSecretName := fmt.Sprintf("%s-%s", userDataSecretName, rand.String(nameLength))
+
 	testCases := []struct {
 		testcase                 string
 		providerConfig           *v1alpha1.PowerVSMachineProviderConfig
 		userDataSecret           *corev1.Secret
 		powerVSCredentialsSecret *corev1.Secret
+		updateNodeRef            bool
+		excludeUserDataSecret    bool
 		expectedError            error
 	}{
 		{
@@ -193,62 +207,82 @@ func TestCreate(t *testing.T) {
 			providerConfig:           stubProviderConfig(credSecretName),
 			userDataSecret:           stubUserDataSecret(userSecretName),
 			powerVSCredentialsSecret: stubPowerVSCredentialsSecret(credSecretName),
-			expectedError:            nil,
+		},
+		{
+			testcase:                 "Error determining if machine is master",
+			providerConfig:           stubProviderConfig(credSecretName),
+			userDataSecret:           stubUserDataSecret(userSecretName),
+			powerVSCredentialsSecret: stubPowerVSCredentialsSecret(credSecretName),
+			updateNodeRef:            true,
+		},
+		{
+			testcase:                 "Error failed to userdata",
+			providerConfig:           stubProviderConfig(credSecretName),
+			userDataSecret:           stubUserDataSecret(userSecretName),
+			excludeUserDataSecret:    true,
+			powerVSCredentialsSecret: stubPowerVSCredentialsSecret(credSecretName),
 		},
 	}
 	for _, tc := range testCases {
-		// create fake resources
-		t.Logf("testCase: %v", tc.testcase)
-
-		machine, err := stubMachine()
-		if err != nil {
-			t.Fatal(err)
-		}
-		encodedProviderConfig, err := v1alpha1.RawExtensionFromProviderSpec(tc.providerConfig)
-		if err != nil {
-			t.Fatalf("Unexpected error")
-		}
-		providerStatus, err := v1alpha1.RawExtensionFromProviderStatus(stubProviderStatus(powerVSProviderID))
-		if err != nil {
-			t.Fatalf("Failed to set providerStatus")
-		}
-		machine.Spec.ProviderSpec = machinev1beta1.ProviderSpec{Value: encodedProviderConfig}
-		machine.Status.ProviderStatus = providerStatus
-
-		fakeClient := fake.NewFakeClientWithScheme(scheme.Scheme, machine, tc.powerVSCredentialsSecret, tc.userDataSecret)
-
-		machineScope, err := newMachineScope(machineScopeParams{
-			client:  fakeClient,
-			machine: machine,
-			powerVSClientBuilder: func(client runtimeclient.Client, secretName, namespace, cloudInstanceID string,
-				debug bool) (client.Client, error) {
-				return mockPowerVSClient, nil
-			},
-			powerVSMinimalClient: func(client runtimeclient.Client) (client.Client, error) {
-				return nil, nil
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		reconciler := newReconciler(machineScope)
-
-		// test create
-		err = reconciler.create()
-		log.Printf("Error is %v", err)
-		if tc.expectedError != nil {
-			if err == nil {
-				t.Error("reconciler was expected to return error")
-			}
-			if err != nil && err.Error() != tc.expectedError.Error() {
-				t.Errorf("Expected: %v, got %v", tc.expectedError, err)
-			}
-		} else {
+		t.Run(tc.testcase, func(t *testing.T) {
+			machine, err := stubMachine()
 			if err != nil {
-				t.Errorf("reconciler was not expected to return error: %v", err)
+				t.Fatal(err)
 			}
-		}
+			encodedProviderConfig, err := v1alpha1.RawExtensionFromProviderSpec(tc.providerConfig)
+			if err != nil {
+				t.Fatalf("Unexpected error")
+			}
+			providerStatus, err := v1alpha1.RawExtensionFromProviderStatus(stubProviderStatus(powerVSProviderID))
+			if err != nil {
+				t.Fatalf("Failed to set providerStatus")
+			}
+			machine.Spec.ProviderSpec = machinev1beta1.ProviderSpec{Value: encodedProviderConfig}
+			machine.Status.ProviderStatus = providerStatus
+			if tc.updateNodeRef {
+				machine.Status.NodeRef = &corev1.ObjectReference{
+					Name: "dummy-noderef",
+				}
+			}
+			var fakeClient runtimeclient.Client
+			if tc.excludeUserDataSecret {
+				fakeClient = fake.NewFakeClientWithScheme(scheme.Scheme, machine, tc.powerVSCredentialsSecret)
+			} else {
+				fakeClient = fake.NewFakeClientWithScheme(scheme.Scheme, machine, tc.powerVSCredentialsSecret, tc.userDataSecret)
+			}
+			machineScope, err := newMachineScope(machineScopeParams{
+				client:  fakeClient,
+				machine: machine,
+				powerVSClientBuilder: func(client runtimeclient.Client, secretName, namespace, cloudInstanceID string,
+					debug bool) (client.Client, error) {
+					return mockPowerVSClient, nil
+				},
+				powerVSMinimalClient: func(client runtimeclient.Client) (client.Client, error) {
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			reconciler := newReconciler(machineScope)
+
+			// test create
+			err = reconciler.create()
+			log.Printf("Error is %v", err)
+			if tc.expectedError != nil {
+				if err == nil {
+					t.Error("reconciler was expected to return error")
+				}
+				if err != nil && err.Error() != tc.expectedError.Error() {
+					t.Errorf("Expected: %v, got %v", tc.expectedError, err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("reconciler was not expected to return error: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -286,36 +320,85 @@ func TestExists(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	fakeClient := fake.NewFakeClientWithScheme(scheme.Scheme)
-	mockCtrl := gomock.NewController(t)
-	mockPowerVSClient := mock.NewMockClient(mockCtrl)
-
-	mockPowerVSClient.EXPECT().GetInstanceByName(gomock.Any()).Return(stubGetInstance(), nil)
-	mockPowerVSClient.EXPECT().DeleteInstance(gomock.Any()).Return(nil)
-
 	machine, err := stubMachine()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	machineScope, err := newMachineScope(machineScopeParams{
-		client:  fakeClient,
-		machine: machine,
-		powerVSClientBuilder: func(client runtimeclient.Client, secretName, namespace, cloudInstanceID string,
-			debug bool) (client.Client, error) {
-			return mockPowerVSClient, nil
+	testCases := []struct {
+		name                   string
+		getInstanceByNameError error
+		deleteInstanceError    error
+		expectedError          error
+	}{
+		{
+			name:                   "delete succeed",
+			getInstanceByNameError: nil,
+			deleteInstanceError:    nil,
+			expectedError:          nil,
 		},
-		powerVSMinimalClient: func(client runtimeclient.Client) (client.Client, error) {
-			return nil, nil
+		{
+			name:                   "get instance by name failed",
+			getInstanceByNameError: fmt.Errorf("failed to connect to cloud"),
+			deleteInstanceError:    nil,
+			expectedError:          fmt.Errorf("failed to connect to cloud"),
 		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create new machine scope error: %v", err)
+		{
+			name:                   "get instance by name failed with instance Not Found",
+			getInstanceByNameError: client.ErrorInstanceNotFound,
+			deleteInstanceError:    nil,
+			expectedError:          nil,
+		},
+		{
+			name:                   "delete instance failed",
+			getInstanceByNameError: nil,
+			deleteInstanceError:    fmt.Errorf("failed to delete instance"),
+			expectedError:          fmt.Errorf("failed to delete instaces: failed to delete instance"),
+		},
 	}
-	reconciler := newReconciler(machineScope)
-	if err := reconciler.delete(); err != nil {
-		if _, ok := err.(*machinecontroller.RequeueAfterError); !ok {
-			t.Errorf("reconciler was not expected to return error: %v", err)
+	for _, tc := range testCases {
+		fakeClient := fake.NewFakeClientWithScheme(scheme.Scheme)
+		mockCtrl := gomock.NewController(t)
+		mockPowerVSClient := mock.NewMockClient(mockCtrl)
+
+		mockPowerVSClient.EXPECT().GetInstanceByName(gomock.Any()).Return(stubGetInstance(), tc.getInstanceByNameError).AnyTimes()
+		mockPowerVSClient.EXPECT().DeleteInstance(gomock.Any()).Return(tc.deleteInstanceError).AnyTimes()
+
+		machineScope, err := newMachineScope(machineScopeParams{
+			client:  fakeClient,
+			machine: machine,
+			powerVSClientBuilder: func(client runtimeclient.Client, secretName, namespace, cloudInstanceID string,
+				debug bool) (client.Client, error) {
+				return mockPowerVSClient, nil
+			},
+			powerVSMinimalClient: func(client runtimeclient.Client) (client.Client, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		reconciler := newReconciler(machineScope)
+
+		// test create
+		err = reconciler.delete()
+		log.Printf("Error is %v", err)
+		if tc.expectedError != nil {
+			if err == nil {
+				t.Error("reconciler was expected to return error")
+			}
+			if err != nil && err.Error() != tc.expectedError.Error() {
+				t.Errorf("Expected: %v, got %v", tc.expectedError, err)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("reconciler was not expected to return error: %v", err)
+			}
 		}
 	}
+}
+
+func TestIsMaster(t *testing.T) {
+
 }

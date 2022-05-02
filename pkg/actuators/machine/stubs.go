@@ -24,6 +24,7 @@ const (
 	networkNamePrefix     = "test-network"
 	testRegion            = "test-region"
 	testZone              = "test-zone"
+	testSysType           = "test-sysType"
 	instanceID            = "testInstanceID"
 	instanceName          = "testInstanceName"
 	inValidInstance       = "testInValidInstanceName"
@@ -83,6 +84,9 @@ func stubProviderConfig(name string) *v1alpha1.PowerVSMachineProviderConfig {
 	testKeyPair := "Test-KeyPair"
 	return &v1alpha1.PowerVSMachineProviderConfig{
 		CredentialsSecret: &corev1.LocalObjectReference{
+			Name: name,
+		},
+		UserDataSecret: &corev1.LocalObjectReference{
 			Name: name,
 		},
 		Memory:      "32",
